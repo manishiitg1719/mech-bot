@@ -302,7 +302,7 @@ class Bot:
         dx, dy, dz = px - mx, py - my, pz - mz
         return [math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))]
 
-    def mortar_aim(self, me, tp, tv, high=False):
+    def mortar_aim(self, me, tp, tv):
         v = self.mortar_speed
         gr = self.gravity
         mx, my, mz = me
@@ -318,9 +318,6 @@ class Bot:
                 return None
             # low arc (faster, better vs moving target)
             th = math.atan2(v * v - math.sqrt(disc), gr * d)
-            if high:
-                th2 = math.atan2(v * v + math.sqrt(disc), gr * d)
-                th = th2 if th2 < 1.25 else max(th, min(1.25, th2))
             t = d / max(v * math.cos(th), 1.0)
             best = [math.atan2(py - my, px - mx), th]
         return best
@@ -441,8 +438,10 @@ class Bot:
         # objective: weapons / cubes when safe
         close_threat = enemies[0][0] if enemies else 999.0
         n_vis = sum(1 for e in enemies if e[0] < 200)
-        aggressive = late or hpf > 0.4 or (n_vis <= 1 and hpf > 0.25)
+        aggressive = late or hpf > 0.55 or (n_vis <= 1 and hpf > 0.3)
         ideal = 45.0
+        if n_vis == 1 and hpf > 0.5:
+            ideal = 30.0  # lone hunter: close in where the gun hits reliably
         if "lightning" in kinds:
             ideal = 32.0
         elif "laser" in kinds:
@@ -499,17 +498,6 @@ class Bot:
                         pass
                 if best:
                     goal = best[1]
-        if hpf < 0.65 and close_threat > 70:
-            for dr in o.get("drops") or []:
-                try:
-                    dp = vec3(dr.get("pos"))
-                    if num(dr.get("lands_in"), 99) < 6 and math.hypot(dp[0] - pos[0], dp[1] - pos[1]) < 150:
-                        h_ = dr.get("holder")
-                        if h_ is None or h_ == my_id:
-                            goal = dp
-                            break
-                except Exception:
-                    pass
         if goal is not None:
             # don't leave the zone for loot
             if math.hypot(goal[0] - tc[0], goal[1] - tc[1]) > trr - margin * 0.5 and math.hypot(goal[0] - zc[0], goal[1] - zc[1]) > zr - 8:
@@ -720,20 +708,6 @@ class Bot:
                             tol = max(0.03, 1.6 * math.atan2(2.5, max(d, 1.0)))
                             if abs(wrap(num(cur[0]) - aim[0])) < tol:
                                 fire[i] = True
-        elif "mortar" in kinds and enemies and (aggressive or late):
-            i, w = kinds["mortar"]
-            d, m, mp, mv = enemies[0]
-            if 35 < d < 225 and num(w.get("cooldown")) <= 0.05:
-                tube = (pos[0], pos[1], pos[2] + muzzle_h * 9.5 / 7.0)
-                ma = self.mortar_aim(tube, (mp[0], mp[1], mp[2]), mv, high=True)
-                if ma is not None:
-                    aim = ma
-                    cur = me.get("aim") or aim
-                    if abs(wrap(num(cur[0]) - aim[0])) < 0.04 and abs(num(cur[1]) - aim[1]) < 0.05:
-                        fire[i] = True
-            if laser_slot is not None and self.laser_hold:
-                fire[laser_slot] = False
-                self.laser_hold = False
         elif laser_slot is not None and self.laser_hold:
             # lost target while charging: keep holding briefly (auto-fire later) - release
             fire[laser_slot] = False
