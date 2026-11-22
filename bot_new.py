@@ -431,8 +431,15 @@ class Bot:
 
         # objective: weapons / cubes when safe
         close_threat = enemies[0][0] if enemies else 999.0
+        n_vis = sum(1 for e in enemies if e[0] < 200)
+        aggressive = late or hpf > 0.4 or (n_vis <= 1 and hpf > 0.25)
+        ideal = 55.0
+        if "lightning" in kinds:
+            ideal = 32.0
+        elif "laser" in kinds:
+            ideal = 90.0
         goal = None
-        if close_threat > 90:
+        if close_threat > 55:
             if free_slot is not None:
                 best = None
                 for p in o.get("pickups") or []:
@@ -441,7 +448,7 @@ class Bot:
                             continue
                         pp = vec3(p.get("pos"))
                         d = math.dist(pp, pos)
-                        if d < 70 and (best is None or d < best[0]):
+                        if d < 120 and (best is None or d < best[0]):
                             best = (d, pp, p)
                     except Exception:
                         pass
@@ -455,7 +462,7 @@ class Bot:
                     try:
                         cp = vec3(c.get("pos"))
                         d = math.dist(cp, pos)
-                        if d < 60 and (best is None or d < best[0]):
+                        if d < 80 and (best is None or d < best[0]):
                             best = (d, cp)
                     except Exception:
                         pass
@@ -498,14 +505,29 @@ class Bot:
             if self.world.inside(cx, cy, cz):
                 s += 500.0
             cp3 = (cx, cy, cz + 4.5)
+            exposed = 0
+            nthr = 0
             for (tp, w, vis) in threats:
                 d = math.hypot(cx - tp[0], cy - tp[1])
-                s += w * dist_w * max(0.0, 160.0 - d)
-                if d < 30:
-                    s += w * (30 - d) * 3
+                if aggressive and vis:
+                    nthr += 1
+                    if nthr <= 2:
+                        s += w * 0.5 * abs(d - ideal)
+                    if d < 18:
+                        s += w * (18 - d) * 4
+                else:
+                    s += w * dist_w * max(0.0, 160.0 - d)
+                    if d < 30:
+                        s += w * (30 - d) * 3
                 if vis and d < 200:
                     if (time.perf_counter() - self.t_start) > 0.022 or not self.world.blocked((tp[0], tp[1], tp[2] + 8.0), cp3):
-                        s += w * expose_w
+                        exposed += 1
+                        if not aggressive:
+                            s += w * expose_w
+            if aggressive and nthr:
+                s += 35.0 * max(0, exposed - 1)
+                if exposed == 0:
+                    s += 12.0
             dm = math.hypot(cx - pos[0], cy - pos[1])
             s += 0.15 * dm
             if goal is not None and abs(cx - goal[0]) < 0.01 and abs(cy - goal[1]) < 0.01:
@@ -579,24 +601,26 @@ class Bot:
         fire = [False, False]
         aim = None
         tgt = None
-        for d, m, mp, mv in enemies:
+        bsc = None
+        for d, m, mp, mv in enemies[:6]:
             if d > 230:
-                break
+                continue
             c3 = (mp[0], mp[1], mp[2] + 4.5)
             if not self.world.blocked(muzzle, c3):
-                tgt = (d, m, mp, mv, c3)
-                break
+                sc = num(m.get("hp"), 1400) + 5.0 * d
+                if bsc is None or sc < bsc:
+                    bsc = sc
+                    tgt = (d, m, mp, mv, c3)
         engage = False
         if tgt is not None:
             d = tgt[0]
             # fight back when close, healthy, or late game / being shot
-            if d < 70 or hpf > 0.55 or late or (t - self.last_damage_t) < 2.0 or close_threat < 45:
-                engage = True
+            engage = True
             # if hurt and can break LOS, prefer regen (no firing) unless very close
-            if hpf < 0.4 and d > 60 and not late:
+            if not aggressive and d > 70 and (t - self.last_damage_t) > 1.5:
                 engage = False
         # npc drones shooting at us
-        if tgt is None and npcs and npcs[0][0] < 45:
+        if tgt is None and npcs and (npcs[0][0] < 45 or (not enemies and hpf > 0.5 and npcs[0][0] < 110)):
             d, m, mp, mv = npcs[0]
             c3 = (mp[0], mp[1], mp[2] + 1.8)
             if not self.world.blocked(muzzle, c3):
@@ -645,7 +669,8 @@ class Bot:
                         if ammo > 0 and num(w.get("reload")) <= 0:
                             # only fire if torso is roughly on target
                             cur = me.get("aim") or aim
-                            if abs(wrap(num(cur[0]) - aim[0])) < 0.12:
+                            tol = max(0.03, 1.6 * math.atan2(2.5, max(d, 1.0)))
+                            if abs(wrap(num(cur[0]) - aim[0])) < tol:
                                 fire[i] = True
         elif laser_slot is not None and self.laser_hold:
             # lost target while charging: keep holding briefly (auto-fire later) - release
