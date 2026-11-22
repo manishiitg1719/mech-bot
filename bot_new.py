@@ -270,6 +270,7 @@ class Bot:
         self.mortar_speed = 72.0
         self.gravity = 22.0
         self.last_aim = [0.0, 0.0]
+        self.pk_mem = {}
 
     # ---------------- hello
     def hello(self, msg):
@@ -418,12 +419,17 @@ class Bot:
         for ei, (d, m, mp, mv) in enumerate(enemies[:6]):
             ehp = num(m.get("hp"), 1400)
             wgt = 1.0 + 0.3 * min(10, num(m.get("cubes"), 0)) / 10.0
-            threats.append((mp, wgt * (0.7 + 0.6 * ehp / 1400.0), ei < 3))
+            ew = m.get("weapons") or []
+            if "laser" in ew:
+                wgt *= 1.8
+            if m.get("charging"):
+                wgt *= 1.5
+            threats.append((mp, wgt * (0.7 + 0.6 * ehp / 1400.0), ei < 3, "laser" in ew))
         for d, m, mp, mv in npcs[:3]:
             if d < 80:
-                threats.append((mp, 0.25, True))
+                threats.append((mp, 0.25, True, False))
         for (te, x, y, w) in self.threat_marks:
-            threats.append(((x, y, pos[2]), w * 0.5, False))
+            threats.append(((x, y, pos[2]), w * 0.5, False, False))
 
         late = zr < 80
         expose_w = 60.0 * (1.6 - hpf)
@@ -433,29 +439,51 @@ class Bot:
         close_threat = enemies[0][0] if enemies else 999.0
         n_vis = sum(1 for e in enemies if e[0] < 200)
         aggressive = late or hpf > 0.4 or (n_vis <= 1 and hpf > 0.25)
-        ideal = 55.0
+        ideal = 45.0
         if "lightning" in kinds:
             ideal = 32.0
         elif "laser" in kinds:
             ideal = 90.0
         goal = None
-        if close_threat > 55:
-            if free_slot is not None:
-                best = None
-                for p in o.get("pickups") or []:
-                    try:
-                        if p.get("kind") in kinds or p.get("kind") == "gun":
-                            continue
-                        pp = vec3(p.get("pos"))
-                        d = math.dist(pp, pos)
-                        if d < 120 and (best is None or d < best[0]):
-                            best = (d, pp, p)
-                    except Exception:
-                        pass
-                if best:
-                    goal = best[1]
-                    if best[0] < 3.8 or (abs(best[1][2] - pos[2]) < 4 and math.hypot(best[1][0] - pos[0], best[1][1] - pos[1]) < 3.8):
-                        act["take"] = best[2].get("id")
+        # remember pickups seen
+        vis_ids = set()
+        for p in o.get("pickups") or []:
+            try:
+                self.pk_mem[p["id"]] = (p.get("kind"), vec3(p.get("pos")), t)
+                vis_ids.add(p["id"])
+            except Exception:
+                pass
+        for pid in list(self.pk_mem):
+            k_, pp_, ts_ = self.pk_mem[pid]
+            if pid not in vis_ids and (math.dist(pp_, pos) < 35 or t - ts_ > 90):
+                del self.pk_mem[pid]
+        PREF = {"laser": 3, "lightning": 2, "mortar": 1}
+        slot1 = weapons[1] if len(weapons) > 1 else None
+        cur1 = PREF.get(slot1.get("kind"), 0) if isinstance(slot1, dict) else -1
+        if close_threat > 40:
+            best = None
+            for pid, (pk, pp, ts_) in self.pk_mem.items():
+                pv = PREF.get(pk, 0)
+                if pk in kinds or pv <= max(cur1, 0) and free_slot is None:
+                    continue
+                if pv == 0:
+                    continue
+                d = math.dist(pp, pos)
+                lim = 220 if free_slot is not None else 90
+                if d > lim:
+                    continue
+                if math.hypot(pp[0] - tc[0], pp[1] - tc[1]) > trr - 5 and math.hypot(pp[0] - zc[0], pp[1] - zc[1]) > zr - 10:
+                    continue
+                sc = d - 40 * pv
+                if best is None or sc < best[0]:
+                    best = (sc, pp, pid, d)
+            if best:
+                goal = best[1]
+                pp = best[1]
+                if abs(pp[2] - pos[2]) < 3.9 and math.hypot(pp[0] - pos[0], pp[1] - pos[1]) < 3.9:
+                    act["take"] = best[2]
+                    if free_slot is None:
+                        act["drop"] = 1
             if goal is None:
                 best = None
                 for c in o.get("cubes") or []:
@@ -507,7 +535,7 @@ class Bot:
             cp3 = (cx, cy, cz + 4.5)
             exposed = 0
             nthr = 0
-            for (tp, w, vis) in threats:
+            for (tp, w, vis, haslaser) in threats:
                 d = math.hypot(cx - tp[0], cy - tp[1])
                 if aggressive and vis:
                     nthr += 1
@@ -524,10 +552,14 @@ class Bot:
                         exposed += 1
                         if not aggressive:
                             s += w * expose_w
+                        elif haslaser and "laser" not in kinds:
+                            s += w * 30.0
+                        elif d > 110:
+                            s += w * 15.0
             if aggressive and nthr:
                 s += 35.0 * max(0, exposed - 1)
                 if exposed == 0:
-                    s += 12.0
+                    s += 6.0
             dm = math.hypot(cx - pos[0], cy - pos[1])
             s += 0.15 * dm
             if goal is not None and abs(cx - goal[0]) < 0.01 and abs(cy - goal[1]) < 0.01:
@@ -645,7 +677,9 @@ class Bot:
                     cd = num(laser_w.get("cooldown"))
                     aim = self.aim_at(muzzle, c3, mv, 1e9)
                     if cd <= 0.05:
-                        if charge >= 0.7:
+                        cur = me.get("aim") or aim
+                        al = abs(wrap(num(cur[0]) - aim[0])) < max(0.02, math.atan2(2.0, max(d, 1.0))) and abs(num(cur[1]) - aim[1]) < 0.06
+                        if charge >= 0.7 and al:
                             fire[laser_slot] = False  # release
                             self.laser_hold = False
                         else:
@@ -663,7 +697,7 @@ class Bot:
                             used = True
                 if not used:
                     gun = kinds.get("gun")
-                    if gun is not None and d < 160:
+                    if gun is not None and (d < 120 or (d < 170 and num(m.get("hp"), 1400) < 400)):
                         i, w = gun
                         ammo = num(w.get("ammo"), 1)
                         if ammo > 0 and num(w.get("reload")) <= 0:
